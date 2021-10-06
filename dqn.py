@@ -1,44 +1,107 @@
+### Based on https://github.com/mahakal001/reinforcement-learning/tree/master/cartpole-dqn
+
 import torch
 from torch import nn
 import copy
 from collections import deque
 import random
+import gym
+from tqdm import tqdm
+import time
+import numpy as np
 
-class DQN_Agent:
 
-    def __init__(self, seed, layer_sizes, lr, sync_freq, exp_replay_size):
-        torch.manual_seed(seed)
-        self.q_net = self.build_fc_net_tanh(layer_sizes).to(device)
-        self.target_net = copy.deepcopy(self.q_net).to(device)
+def get_stats(results):
+    mean = np.mean(results)
+    std = np.std(results)
+    min = np.min(results)
+    max = np.max(results)
+    median = np.median(results)
+    return mean, std, min, max, median
 
+
+def build_fc_net_tanh(layer_sizes):
+    assert len(layer_sizes) > 1
+    layers = []
+    for index in range(len(layer_sizes) - 1):
+        linear = nn.Linear(layer_sizes[index], layer_sizes[index + 1])
+        act = nn.Tanh() if index < len(layer_sizes) - 2 else nn.Identity()
+        layers += (linear, act)
+    return nn.Sequential(*layers)
+
+
+class DQNAgent:
+
+    def __init__(self, config):
+
+        self.num_actions = config['num_actions']
+        self.num_features = config['num_features']
+
+        self.seed = None
+        self.rng = None
+        self.gamma = None
+        self.epsilon = None
+        self.layer_sizes = None
+        self.q_net = None
+        self.target_net = None
+        self.net_sync_freq = None
+        self.net_sync_counter = None
+        self.load_model_from = None
+        self.param_update_freq = None
+        self.step_size = None
+        self.buffer_size = None
+        self.experience_buffer = None
+        self.loss_fn = None
+        self.optimizer = None
+        self.batch_size = None
+        self.device = None
+        self.last_obs = None
+        self.last_action = None
+        self.counter = None
+        self.model_save_loc_name = None
+
+    def agent_init(self, agent_info):
+
+        self.seed = agent_info.get('rng_seed', 42)
+        self.rng = torch.Generator()
+        self.rng.manual_seed(self.seed)
+
+        self.gamma = torch.tensor(agent_info.get('gamma', 0.95)).float().to(device)
+        self.epsilon = torch.tensor(agent_info.get('epsilon', 0.2)).float().to(device)
+
+        assert 'layer_sizes' in agent_info, "layer_sizes needs to be specified in agent_info"
+        self.layer_sizes = agent_info['layer_sizes']
+
+        assert 'device' in agent_info, "device needs to be specified in agent_info"
+        self.device = agent_info['device']
+
+        self.q_net = build_fc_net_tanh(self.layer_sizes).to(self.device)
+        self.load_model_from = agent_info.get('load_model_from', None)
+        if self.load_model_from:
+            self.q_net.load_state_dict(torch.load(self.load_model_from))
+        self.target_net = copy.deepcopy(self.q_net).to(self.device)
+        self.net_sync_freq = agent_info.get('net_sync_freq', 256)
+        self.net_sync_counter = 0
+        self.param_update_freq = agent_info.get('param_update_freq', 32)
+
+        self.step_size = agent_info.get('step_size', 1e-3)
         self.loss_fn = torch.nn.MSELoss()
-        self.optimizer = torch.optim.Adam(self.q_net.parameters(), lr=lr)
+        self.optimizer = torch.optim.Adam(self.q_net.parameters(), lr=self.step_size)
+        self.batch_size = agent_info.get('batch_size', 32)
 
-        self.network_sync_freq = sync_freq
-        self.network_sync_counter = 0
-        self.gamma = torch.tensor(0.95).float().to(device)
-        self.experience_replay = deque(maxlen=exp_replay_size)
-        return
+        self.buffer_size = agent_info.get('buffer_size', 50000)
+        self.experience_buffer = deque(maxlen=self.buffer_size)
 
-    def build_fc_net_tanh(self, layer_sizes):
-        assert len(layer_sizes) > 1
-        layers = []
-        for index in range(len(layer_sizes) - 1):
-            linear = nn.Linear(layer_sizes[index], layer_sizes[index + 1])
-            act = nn.Tanh() if index < len(layer_sizes) - 2 else nn.Identity()
-            layers += (linear, act)
-        return nn.Sequential(*layers)
+        self.counter = 0
+        self.model_save_loc_name = agent_info.get('model_save_loc_name', 'models/cartpole-dqn.pth')
 
-    def load_pretrained_model(self, model_path):
-        self.q_net.load_state_dict(torch.load(model_path))
+    def save_trained_model(self):
+        torch.save(self.q_net.state_dict(), self.model_save_loc_name)
 
-    def save_trained_model(self, model_path="cartpole-dqn.pth"):
-        torch.save(self.q_net.state_dict(), model_path)
-
-    def get_action(self, state, action_space_len, epsilon):
+    def choose_action(self, state):
         assert state.ndim == 1, "get_action expects to return the action for a single state, not a vector of states"
-        if torch.rand(1).item() < epsilon:
-            action = torch.randint(0, action_space_len, (1,))
+        if torch.rand(1).item() < self.epsilon:
+            action = torch.randint(0, self.num_actions, (1,))
         else:
             with torch.no_grad():   # because gradients not required here
                 qs = self.q_net(torch.from_numpy(state).float().to(device))
@@ -55,29 +118,61 @@ class DQN_Agent:
         return q_next
 
     def add_to_buffer(self, experience):
-        self.experience_replay.append(experience)
+        self.experience_buffer.append(experience)
         return
 
-    def sample_from_buffer(self, sample_size):
-        if len(self.experience_replay) < sample_size:
-            sample_size = len(self.experience_replay)
-        sample = random.sample(self.experience_replay, sample_size)
-        s = torch.tensor([exp[0] for exp in sample]).float()
-        a = torch.tensor([exp[1] for exp in sample]).long()
-        rn = torch.tensor([exp[2] for exp in sample]).float()
-        sn = torch.tensor([exp[3] for exp in sample]).float()
-        return s, a, rn, sn
+    def sample_from_buffer(self):
 
-    def train(self, batch_size):
-        if self.network_sync_counter == self.network_sync_freq:
-            self.target_net.load_state_dict(self.q_net.state_dict())
-            self.network_sync_counter = 0
-        self.network_sync_counter += 1
+        num_samples = self.buffer_size if len(self.experience_buffer) >= self.buffer_size else len(self.experience_buffer)
+        sample = random.sample(self.experience_buffer, num_samples)
+        states = torch.tensor([exp[0] for exp in sample]).float()    # ToDo: check if all can be sent to device here itself
+        actions = torch.tensor([exp[1] for exp in sample]).long()
+        rewards = torch.tensor([exp[2] for exp in sample]).float()
+        next_states = torch.tensor([exp[3] for exp in sample]).float()
+        return states, actions, rewards, next_states
 
-        states, actions, rewards, next_states = self.sample_from_buffer(sample_size=batch_size)
+    def update_epsilon(self):
+        if self.epsilon > 0.05:
+            self.epsilon -= (1 / 5000)
+
+    def process_raw_observation(self, next_state):
+        return next_state
+
+    def agent_start(self, first_state):
+        observation = self.process_raw_observation(first_state)
+        action = self.choose_action(observation)
+        self.last_obs = observation
+        self.last_action = action
+        return action
+
+    def agent_step(self, reward, next_state, info):
+        self.counter += 1
+        loss = None
+
+        observation = self.process_raw_observation(next_state)
+        self.add_to_buffer([self.last_obs, self.last_action, reward, observation])
+
+        # if time to update parameters
+        if self.counter % self.param_update_freq == 0:
+            # if time to update target network
+            if self.counter % self.net_sync_freq == 0:
+                self.target_net.load_state_dict(self.q_net.state_dict())
+            # update q_net parameters
+            loss = self.update_params()
+
+        self.update_epsilon()
+        action = self.choose_action(observation)
+        self.last_obs = observation
+        self.last_action = action
+        return action, loss
+
+    def update_params(self):
+
+        # sample a batch of transitions
+        states, actions, rewards, next_states = self.sample_from_buffer()
 
         # predict expected return of current state using main network
-        qs = self.q_net(states.to(device))   # ToDo: can these be returned from the buffer as to(device)?
+        qs = self.q_net(states.to(device))  # ToDo: can these be returned from the buffer as to(device)?
         # pred_return, _ = torch.max(qs, axis=1)
         pred_return = qs.gather(index=actions.unsqueeze(-1), dim=1).squeeze(1)
 
@@ -87,100 +182,81 @@ class DQN_Agent:
 
         loss = self.loss_fn(pred_return, target_return)
         self.optimizer.zero_grad()
-        loss.backward(retain_graph=True)
+        loss.backward(retain_graph=True)  # ToDo: I don't think retain_graph should be True
         self.optimizer.step()
 
         return loss.item()
 
 
-import gym
-from tqdm import tqdm
-import time
-
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-
-def train():
+def experiment_loop(exp_info, env_info, agent_info):
     env = gym.make('CartPole-v0')
     input_dim = env.observation_space.shape[0]
     output_dim = env.action_space.n
-    exp_replay_size = 256
-    agent = DQN_Agent(seed=1423, layer_sizes=[input_dim, 64, output_dim], lr=1e-3, sync_freq=5,
-                      exp_replay_size=exp_replay_size)
+    agent = DQNAgent(config={'num_features': input_dim, 'num_actions': output_dim})
+    agent.agent_init(agent_info)
 
     # Main training loop
     losses_list, reward_list, episode_len_list, epsilon_list = [], [], [], []
-    episodes = 10000
-    epsilon = 1
+    num_episodes = exp_info.get('num_episodes', 10000)
+    render = env_info.get('render', False)
 
-    # initialize experience replay
-    index = 0
-    for i in range(exp_replay_size):
-        obs = env.reset()
-        done = False
-        while not done:
-            action = agent.get_action(obs, env.action_space.n, epsilon=1)
-            obs_next, reward, done, _ = env.step(action)
-            agent.add_to_buffer([obs, action, reward, obs_next])
-            obs = obs_next
-            index += 1
-            if index > exp_replay_size:
-                break
-
-    index = 128
-    for i in tqdm(range(episodes)):
-        obs, done, losses, ep_len, rew = env.reset(), False, 0, 0, 0
-        while not done:
-            ep_len += 1
-            action = agent.get_action(obs, env.action_space.n, epsilon)
-            obs_next, reward, done, _ = env.step(action)
-            agent.add_to_buffer([obs, action, reward, obs_next])
-
-            obs = obs_next
-            rew += reward
-            index += 1
-
-            if index > 128:
-                index = 0
-                for j in range(4):
-                    loss = agent.train(batch_size=16)
-                    losses += loss
-        if epsilon > 0.05:
-            epsilon -= (1 / 5000)
-
-        losses_list.append(losses / ep_len), reward_list.append(rew)
-        episode_len_list.append(ep_len), epsilon_list.append(epsilon)
-
-    print("Saving trained model")
-    agent.save_trained_model("cartpole-dqn.pth")
-
-
-def test():
-
-    env = gym.make('CartPole-v0')
-    # env = gym.wrappers.Monitor(env, "record_dir", force='True')
-
-    input_dim = env.observation_space.shape[0]
-    output_dim = env.action_space.n
-    exp_replay_size = 256
-    agent = DQN_Agent(seed=1423, layer_sizes=[input_dim, 64, output_dim], lr=1e-3, sync_freq=5,
-                      exp_replay_size=exp_replay_size)
-    agent.load_pretrained_model("cartpole-dqn.pth")
-
-    reward_arr = []
-    for i in tqdm(range(100)):
-        obs, done, rew = env.reset(), False, 0
-        while not done:
-            action = agent.get_action(obs, env.action_space.n, epsilon=0)
-            obs, reward, done, info = env.step(action)
-            rew += reward
-            time.sleep(0.01)
+    for i in tqdm(range(num_episodes)):
+        obs, done, losses, eps_len, eps_ret = env.reset(), False, 0, 0, 0
+        action = agent.agent_start(obs)
+        if render:
             env.render()
+            time.sleep(0.01)
 
-        reward_arr.append(rew)
-    print("average reward per episode :", sum(reward_arr) / len(reward_arr))
+        while not done:
+            eps_len += 1
+            obs_next, reward, done, _ = env.step(action)
+            action, loss = agent.agent_step(reward, obs_next, False)
+            eps_ret += reward
+            if loss is not None:
+                losses += loss
+            if render:
+                env.render()
+                time.sleep(0.01)
+
+        losses_list.append(losses / eps_len), reward_list.append(eps_ret)
+        episode_len_list.append(eps_len), epsilon_list.append(agent.epsilon)
+
+    # print(f'Average episode length: {sum(episode_len_list)/num_episodes}')
+    # print(f'Average episode length (last half of training): {sum(episode_len_list[num_episodes//2:])/(num_episodes/2)}')
+    print(f'Stats (mean, std, min, max, median): {get_stats(episode_len_list)}')
+    print(f'Stats (last half): {get_stats(episode_len_list[num_episodes//2:])}')
+    print("Saving trained model")
+    agent.save_trained_model()
 
 
 if __name__ == '__main__':
-    train()
-    test()
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    # experiment_loop(
+    #     exp_info={'num_episodes':10000},
+    #     env_info={'render': False},
+    #     agent_info={'layer_sizes': [4, 64, 2],
+    #                 'step_size': 1e-3,
+    #                 'epsilon': 1.0,
+    #                 'rng_seed': 1423,
+    #                 'net_sync_freq': 128,
+    #                 'buffer_size': 256,
+    #                 'param_update_freq': 32,
+    #                 'batch_size': 16,
+    #                 'device': device,
+    #                 'model_save_loc_name': 'models/cartpole-dqn.pth'}
+    # )
+
+    experiment_loop(
+        exp_info={'num_episodes': 10},
+        env_info={'render': True},
+        agent_info={'layer_sizes': [4, 64, 2],
+                    'step_size': 0.0,
+                    'epsilon': 0.0,
+                    'load_model_from': 'cartpole-dqn.pth',
+                    'rng_seed': 1423,
+                    'net_sync_freq': 10000,
+                    'buffer_size': 256,
+                    'param_update_freq': 10000,
+                    'batch_size': 16,
+                    'device': device}
+    )
