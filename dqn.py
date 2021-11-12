@@ -131,10 +131,15 @@ class DQNAgent:
 
         num_samples = self.buffer_size if len(self.experience_buffer) >= self.buffer_size else len(self.experience_buffer)
         sample = random.sample(self.experience_buffer, num_samples)
-        states = torch.tensor([exp[0] for exp in sample]).float()    # ToDo: check if all can be sent to device here itself
-        actions = torch.tensor([exp[1] for exp in sample]).long()
-        rewards = torch.tensor([exp[2] for exp in sample]).float()
-        next_states = torch.tensor([exp[3] for exp in sample]).float()
+        s, a, r, sn = zip(*sample)
+        states = torch.tensor(np.array(s)).float()
+        actions = torch.tensor(np.array(a)).long()  # ToDo: check if all can be sent to device here itself
+        rewards = torch.tensor(np.array(r)).float()
+        next_states = torch.tensor(np.array(sn)).float()
+        # states = torch.tensor([exp[0] for exp in sample]).float()
+        # actions = torch.tensor([exp[1] for exp in sample]).long()
+        # rewards = torch.tensor([exp[2] for exp in sample]).float()
+        # next_states = torch.tensor([exp[3] for exp in sample]).float()
         return states, actions, rewards, next_states
 
     def update_epsilon(self):
@@ -188,7 +193,7 @@ class DQNAgent:
 
         loss = self.loss_fn(pred_return, target_return)
         self.optimizer.zero_grad()
-        loss.backward(retain_graph=True)  # ToDo: I don't think retain_graph should be True
+        loss.backward()  # ToDo: I don't think retain_graph should be True
         self.optimizer.step()
 
         return loss.item()
@@ -200,6 +205,7 @@ class DQNAgent:
 def experiment_loop(exp_info, env_info, agent_info):
     # Main training loop
     # losses_list, reward_list, episode_len_list, epsilon_list = [], [], [], []
+    exp_name = exp_info.get('exp_name', 'DQN_vanilla')
     num_runs = exp_info.get('num_runs', 5)
     num_episodes = exp_info.get('num_episodes', 10000)
     returns_all = np.zeros((num_runs, num_episodes))
@@ -243,7 +249,7 @@ def experiment_loop(exp_info, env_info, agent_info):
         print(f'Stats (last half): {get_stats(returns_all[run, num_episodes//2:])}')
         if agent.save_model:
             print("Saving trained model")
-            suffix = f'_{run}'
+            suffix = f'{exp_name}_{run}'
             agent.save_trained_model(suffix)
         env.close()
 
@@ -252,11 +258,11 @@ def experiment_loop(exp_info, env_info, agent_info):
     print(f'Final stats (last 10%): {get_stats(returns_all[:, int(0.9*num_episodes):])}')
 
 
-def run(save_model_loc=None, load_model_from=None, device='cpu', mode='eval'):
+def run(save_model_loc=None, load_model_from=None, device='cpu', mode='eval', exp_name='DQN_CartPole_vanilla'):
 
-    if mode=='train':
+    if mode == 'train':
         epsilon = 1.0
-        step_size = 1e-3
+        step_size = 3e-3
         save_model = True
         num_runs = 5
         num_episodes = 10000
@@ -272,17 +278,17 @@ def run(save_model_loc=None, load_model_from=None, device='cpu', mode='eval'):
         render = True
 
     experiment_loop(
-        exp_info={'num_episodes': num_episodes,
+        exp_info={'exp_name': exp_name,
+                  'num_episodes': num_episodes,
                   'num_runs': num_runs},
         env_info={'render': render},
         agent_info={'layer_sizes': [4, 64, 2],
                     'step_size': step_size,
                     'epsilon': epsilon,
-                    'rng_seed': 1423,
-                    'net_sync_freq': 128,
-                    'buffer_size': 256,
+                    'net_sync_freq': 256,
+                    'buffer_size': 128,
                     'param_update_freq': param_update_freq,
-                    'batch_size': 16,
+                    'batch_size': 32,
                     'device': device,
                     'save_model': save_model,
                     'save_model_loc': save_model_loc,
@@ -295,5 +301,5 @@ if __name__ == '__main__':
     # # run('models/cartpole-dqn', device=device, render=False, num_episodes=10000, num_runs=5, save_model=True)
     # run('models/cartpole-dqn.pth_4.pth', device=device, render=True, num_episodes=50, num_runs=1, save_model=False)
 
-    run(save_model_loc='models/cartpole-dqn', device=device, mode='train')
-    # run(load_model_from='models/cartpole-dqn_4.pth', device=device, mode='eval')
+    # run(save_model_loc='models/', device=device, mode='train', exp_name='DQN_CartPole_noretain_diffParams_buffer128_3e-3')
+    run(load_model_from='models/DQN_CartPole_noretain_diffParams_buffer128_3e-3_3.pth', device=device, mode='eval')
