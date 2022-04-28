@@ -111,7 +111,7 @@ class DQNAgent:
         else:
             with torch.no_grad():   # because gradients not required here
                 qs = self.q_net(torch.from_numpy(state).float().to(device))
-            _, action = torch.max(qs, axis=0)
+            _, action = torch.max(qs, dim=0)
             ### ToDo: uhh, torch doesn't have an obvious way to get all argmax elements and then choose one randomly
             # action_idx = torch.randint(0, actions.shape[0]+1, (1,))
             # action = actions[action_idx]
@@ -120,7 +120,7 @@ class DQNAgent:
     def get_bootstrapping_values(self, next_state_vec):
         with torch.no_grad():
             qs_next = self.target_net(next_state_vec)     # ToDo: check why this doesn't need to(device)
-        q_next, _ = torch.max(qs_next, axis=1)
+        q_next, _ = torch.max(qs_next, dim=1)
         return q_next
 
     def add_to_buffer(self, experience):
@@ -129,7 +129,8 @@ class DQNAgent:
 
     def sample_from_buffer(self):
 
-        num_samples = self.buffer_size if len(self.experience_buffer) >= self.buffer_size else len(self.experience_buffer)
+        #num_samples = self.buffer_size if len(self.experience_buffer) >= self.buffer_size else len(self.experience_buffer)
+        num_sampes = min(self.buffer_size, len(self.experience_buffer))
         sample = random.sample(self.experience_buffer, num_samples)
         s, a, r, sn = zip(*sample)
         states = torch.tensor(np.array(s)).float()
